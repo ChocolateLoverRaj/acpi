@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 use bit_field::BitField;
 use byteorder::{ByteOrder, LittleEndian};
 use core::mem;
+pub use smallvec;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Resource {
@@ -339,6 +340,8 @@ fn address_space_descriptor<T>(bytes: &[u8]) -> Result<Resource, AmlError> {
     }))
 }
 
+pub type Irqs = smallvec::SmallVec<[u32; 1]>;
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct IrqDescriptor {
     pub is_consumer: bool,
@@ -346,11 +349,7 @@ pub struct IrqDescriptor {
     pub polarity: InterruptPolarity,
     pub is_shared: bool,
     pub is_wake_capable: bool,
-    /*
-     * NOTE: We currently only support the cases where a descriptor only contains a single interrupt
-     * number.
-     */
-    pub irq: u32,
+    pub irqs: Irqs,
 }
 
 fn irq_format_descriptor(bytes: &[u8]) -> Result<Resource, AmlError> {
@@ -386,6 +385,15 @@ fn irq_format_descriptor(bytes: &[u8]) -> Result<Resource, AmlError> {
      *              0  Level-Triggered – Interrupt is triggered in response to signal in a low state.
      *              1  Edge-Triggered – Interrupt is triggered in response to a change in signal state from low to high.
      */
+    fn irqs_from_bit_mask(bit_mask: u16) -> Irqs {
+        let mut irqs = Irqs::default();
+        for bit in 0..16 {
+            if bit_mask.get_bit(bit) {
+                irqs.push(bit as u32);
+            }
+        }
+        irqs
+    }
 
     match bytes.len() {
         0..=2 => Err(AmlError::InvalidResourceDescriptor),
@@ -394,7 +402,7 @@ fn irq_format_descriptor(bytes: &[u8]) -> Result<Resource, AmlError> {
             let irq = LittleEndian::read_u16(&bytes[1..=2]);
 
             Ok(Resource::Irq(IrqDescriptor {
-                irq: irq as u32,
+                irqs: irqs_from_bit_mask(irq),
                 is_wake_capable: false,
                 is_shared: false,
                 polarity: InterruptPolarity::ActiveHigh,
@@ -420,7 +428,7 @@ fn irq_format_descriptor(bytes: &[u8]) -> Result<Resource, AmlError> {
             };
 
             Ok(Resource::Irq(IrqDescriptor {
-                irq: irq as u32,
+                irqs: irqs_from_bit_mask(irq),
                 is_wake_capable,
                 is_shared,
                 polarity,
@@ -568,8 +576,25 @@ fn extended_interrupt_descriptor(bytes: &[u8]) -> Result<Resource, AmlError> {
     }
 
     let number_of_interrupts = bytes[4] as usize;
-    assert_eq!(number_of_interrupts, 1);
-    let irq = LittleEndian::read_u32(&[bytes[5], bytes[6], bytes[7], bytes[8]]);
+
+    let irqs = if number_of_interrupts == 1 {
+        let irq = LittleEndian::read_u32(&bytes[5..9]);
+
+        Irqs::from_buf([irq])
+    } else {
+        let mut irqs = Irqs::with_capacity(number_of_interrupts);
+
+        for i in 0..number_of_interrupts {
+            let start = 5 + i * size_of::<u32>();
+            let end = start + 4;
+
+            let irq = LittleEndian::read_u32(&bytes[start..end]);
+
+            irqs.push(irq);
+        }
+
+        irqs
+    };
 
     Ok(Resource::Irq(IrqDescriptor {
         is_consumer: bytes[3].get_bit(0),
@@ -577,7 +602,7 @@ fn extended_interrupt_descriptor(bytes: &[u8]) -> Result<Resource, AmlError> {
         polarity: if bytes[3].get_bit(2) { InterruptPolarity::ActiveLow } else { InterruptPolarity::ActiveHigh },
         is_shared: bytes[3].get_bit(3),
         is_wake_capable: bytes[3].get_bit(4),
-        irq,
+        irqs,
     }))
 }
 
@@ -641,7 +666,7 @@ mod tests {
                     polarity: InterruptPolarity::ActiveHigh,
                     is_shared: false,
                     is_wake_capable: false,
-                    irq: (1 << 1)
+                    irqs: Irqs::from_buf([1 << 1])
                 })
             ])
         );
@@ -898,7 +923,7 @@ mod tests {
                     polarity: InterruptPolarity::ActiveHigh,
                     is_shared: false,
                     is_wake_capable: false,
-                    irq: (1 << 6)
+                    irqs: Irqs::from_buf([1 << 6])
                 }),
                 Resource::Dma(DMADescriptor {
                     channel_mask: 1 << 2,
