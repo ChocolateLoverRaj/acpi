@@ -6,3 +6,4 @@ tests/*.lst
 tests/*.txt
 dumps/
 tools/no_alloc_check/target
+/.direnv
